@@ -79,9 +79,10 @@ const layer = Layer.effect(
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
       if (!existing) {
-        yield* status.set(sessionID, { type: "idle" })
+        yield* status.set(sessionID, { type: "idle" }, "interrupted")
         return
       }
+      yield* status.set(sessionID, { type: "idle" }, "interrupted")
       yield* existing.cancel
     })
 

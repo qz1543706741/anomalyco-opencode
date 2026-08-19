@@ -2,6 +2,7 @@ import { EventEmitter } from "events"
 import { Identifier } from "@/id/id"
 
 export type GlobalEvent = {
+  userId?: string
   directory?: string
   project?: string
   workspace?: string

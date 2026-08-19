@@ -4,6 +4,8 @@ import { Database } from "@opencode-ai/core/database/database"
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
 import { effectCmd } from "../effect-cmd"
+import { EffectDrizzleMysql } from "@opencode-ai/effect-drizzle-mysql"
+import { MysqlMigration } from "@opencode-ai/core/persistence/mysql/migration"
 
 const QueryCommand = effectCmd({
   command: "$0 [query]",
@@ -23,7 +25,7 @@ const QueryCommand = effectCmd({
       })
   },
   handler: Effect.fn("Cli.db.query")(function* (args: { query?: string; format: string }) {
-    const query = args.query as string | undefined
+    const query = args.query
     if (query) {
       const { db } = yield* Database.Service
       const result = yield* db.all<Record<string, unknown>>(sql.raw(query)).pipe(Effect.orDie)
@@ -51,12 +53,49 @@ const PathCommand = effectCmd({
   }),
 })
 
+const MigrateCommand = effectCmd({
+  command: "migrate",
+  describe: "apply MySQL schema migrations",
+  instance: false,
+  handler: Effect.fn("Cli.db.migrate")(() =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (process.env.OPENCODE_DB_DIALECT !== "mysql") throw new Error("OPENCODE_DB_DIALECT=mysql is required")
+        const url = required("MYSQL_URL")
+        const mysql = yield* EffectDrizzleMysql.make({
+          url,
+          connectionLimit: number("MYSQL_POOL_MAX", 10),
+          maxIdle: 2,
+          idleTimeout: 60_000,
+          connectTimeout: number("MYSQL_ACQUIRE_TIMEOUT_MS", 3_000),
+        }).pipe(Effect.orDie)
+        yield* MysqlMigration.migrate(mysql.pool).pipe(Effect.orDie)
+        console.log(`MySQL schema migrated to ${MysqlMigration.latest}`)
+      }),
+    ),
+  ),
+})
+
 export const DbCommand = effectCmd({
   command: "db",
   describe: "database tools",
   instance: false,
   builder: (yargs: Argv) => {
-    return yargs.command(QueryCommand).command(PathCommand).demandCommand()
+    return yargs.command(MigrateCommand).command(QueryCommand).command(PathCommand).demandCommand()
   },
   handler: Effect.fn("Cli.db")(function* () {}),
 })
+
+function number(name: string, fallback: number) {
+  const value = process.env[name]
+  if (!value) return fallback
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`)
+  return parsed
+}
+
+function required(name: string) {
+  const value = process.env[name]
+  if (!value) throw new Error(`${name} is required`)
+  return value
+}

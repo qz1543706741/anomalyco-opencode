@@ -1,4 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Database } from "@opencode-ai/core/database/database"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { PlanExitTool } from "./plan"
@@ -10,7 +11,6 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
-import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -54,6 +54,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
+import { RuntimeConfig } from "./runtime-config"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
@@ -70,6 +71,7 @@ type State = {
 }
 
 export interface Interface {
+  readonly allowed: (id: string) => Effect.Effect<boolean>
   readonly ids: () => Effect.Effect<string[]>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
@@ -92,6 +94,7 @@ const layer = Layer.effect(
     const truncate = yield* Truncate.Service
     const flags = yield* RuntimeFlags.Service
     const mcp = yield* MCP.Service
+    const runtime = yield* RuntimeConfig.Service
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
@@ -248,9 +251,14 @@ const layer = Layer.effect(
       }),
     )
 
+    const allowed: Interface["allowed"] = Effect.fn("ToolRegistry.allowed")(function* (id) {
+      return runtime.toolAllowlist?.has(id) ?? true
+    })
+
     const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
       const s = yield* InstanceState.get(state)
-      return [...s.builtin, ...s.custom] as Tool.Def[]
+      const tools = [...s.builtin, ...s.custom] as Tool.Def[]
+      return runtime.toolAllowlist ? tools.filter((tool) => runtime.toolAllowlist?.has(tool.id)) : tools
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
@@ -339,7 +347,7 @@ const layer = Layer.effect(
       return { task: s.task, read: s.read }
     })
 
-    return Service.of({ ids, all, named, tools })
+    return Service.of({ allowed, ids, all, named, tools })
   }),
 )
 
@@ -441,6 +449,7 @@ export const node = LayerNode.make({
     Format.node,
     Truncate.node,
     RuntimeFlags.node,
+    RuntimeConfig.node,
     MCP.node,
     Database.node,
     Ripgrep.node,

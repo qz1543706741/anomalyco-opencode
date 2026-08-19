@@ -55,6 +55,57 @@ describe("Npm.add", () => {
 
     expect(entry.entrypoint).toBeDefined()
   })
+
+  test("installs a plugin package with only an explicit server export", async () => {
+    await using tmp = await tmpdir()
+    const fixture = path.join(tmp.path, "fixture-plugin")
+    await fs.mkdir(fixture)
+    await writePackage(fixture, {
+      name: "@acme/fixture-plugin",
+      type: "module",
+      exports: { "./server": "./server.js" },
+    })
+    await Bun.write(path.join(fixture, "server.js"), "export default { server: async () => ({}) }\n")
+
+    const spec = `@acme/fixture-plugin@file:${fixture}`
+    const entry = await Effect.gen(function* () {
+      const npm = yield* Npm.Service
+      return yield* npm.add(spec)
+    }).pipe(Effect.scoped, Effect.provide(npmLayer(path.join(tmp.path, "cache"))), Effect.runPromise)
+
+    expect(entry.directory).toEndWith(path.join("node_modules", "@acme", "fixture-plugin"))
+    expect(entry.entrypoint).toBeUndefined()
+  })
+
+  test("respects project .npmrc when installing into the package cache", async () => {
+    await using tmp = await tmpdir()
+    const project = path.join(tmp.path, "project")
+    const fixture = path.join(tmp.path, "fixture-provider")
+    await fs.mkdir(project)
+    await fs.mkdir(fixture)
+    await Bun.write(path.join(project, ".npmrc"), "package-lock=false\n")
+    await writePackage(fixture, {
+      name: "fixture-provider",
+      main: "index.js",
+    })
+    await Bun.write(path.join(fixture, "index.js"), "export const fixture = true\n")
+
+    const spec = `fixture-provider@file:${fixture}`
+    const cwd = process.cwd()
+    process.chdir(project)
+    try {
+      await Effect.gen(function* () {
+        const npm = yield* Npm.Service
+        yield* npm.add(spec)
+      }).pipe(Effect.scoped, Effect.provide(npmLayer(path.join(tmp.path, "cache"))), Effect.runPromise)
+    } finally {
+      process.chdir(cwd)
+    }
+
+    await expect(
+      fs.stat(path.join(tmp.path, "cache", "packages", Npm.sanitize(spec), "package-lock.json")),
+    ).rejects.toThrow()
+  })
 })
 
 describe("Npm.install", () => {

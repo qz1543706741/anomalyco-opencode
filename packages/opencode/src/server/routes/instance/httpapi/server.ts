@@ -13,6 +13,7 @@ import { Config } from "@/config/config"
 import { Workspace } from "@/control-plane/workspace"
 import { Env } from "@/env"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { MysqlEventV2Bridge } from "@/event-v2-bridge-mysql"
 import { Format } from "@/format"
 import { Git } from "@/git"
 import { Installation } from "@/installation"
@@ -20,6 +21,7 @@ import { LSP } from "@/lsp/lsp"
 import { MCP } from "@/mcp"
 import { McpAuth } from "@/mcp/auth"
 import { Permission } from "@/permission"
+import { MysqlPermission } from "@/permission/mysql"
 import { Plugin } from "@/plugin"
 import { PluginPtyEnvironment } from "@/plugin/pty-environment"
 import { InstanceStore } from "@/project/instance-store"
@@ -28,6 +30,7 @@ import { Vcs } from "@/project/vcs"
 import { ProviderAuth } from "@/provider/auth"
 import { Provider } from "@/provider/provider"
 import { Question } from "@/question"
+import { MysqlQuestion } from "@/question/mysql"
 import { SessionCompaction } from "@/session/compaction"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
@@ -36,9 +39,14 @@ import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { Session } from "@/session/session"
+import { SessionAdmission } from "@/session/admission"
+import { MysqlSessionAdmission } from "@/session/admission-mysql"
+import { MysqlSession } from "@/session/mysql"
 import { SessionStatus } from "@/session/status"
+import { MysqlSessionStatus } from "@/session/status-mysql"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
+import { MysqlTodo } from "@/session/todo-mysql"
 import { SessionShare } from "@/share/session"
 import { ShareNext } from "@/share/share-next"
 import { Skill } from "@/skill"
@@ -46,6 +54,7 @@ import { Discovery } from "@/skill/discovery"
 import { Snapshot } from "@/snapshot"
 import { Storage } from "@/storage/storage"
 import { ToolRegistry } from "@/tool/registry"
+import { RuntimeConfig } from "@/tool/runtime-config"
 import { Truncate } from "@/tool/truncate"
 import { Worktree } from "@/worktree"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -108,6 +117,7 @@ import { schemaErrorLayer as v2SchemaErrorLayer } from "@opencode-ai/server/midd
 import { workspaceHandlers } from "./handlers/workspace"
 import { instanceContextLayer } from "./middleware/instance-context"
 import { workspaceRoutingLayer } from "./middleware/workspace-routing"
+import { requestScopeLayer } from "./middleware/request-scope"
 import { disposeMiddleware } from "./lifecycle"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { compressionLayer } from "./middleware/compression"
@@ -145,7 +155,7 @@ const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
 )
 const eventApiRoutes = HttpApiBuilder.layer(EventApi).pipe(
   Layer.provide(eventHandlers),
-  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
+  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer, requestScopeLayer]),
 )
 const ptyConnectApiRoutes = HttpApiBuilder.layer(PtyConnectApi).pipe(
   Layer.provide(ptyConnectHandlers),
@@ -172,13 +182,24 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
 )
 
 const instanceRoutes = instanceApiRoutes.pipe(
-  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer, schemaErrorLayer]),
+  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer, requestScopeLayer, schemaErrorLayer]),
 )
 const serverRoutes = HttpApiBuilder.layer(Api).pipe(
   Layer.provide(handlers),
   Layer.provide(PluginPtyEnvironment.layer),
   Layer.provide([serverHttpApiAuthLayer, v2SchemaErrorLayer]),
 )
+const mysqlDisabledApiRoute = HttpRouter.use((router) =>
+  router.add("*", "/api/*", () =>
+    Effect.succeed(
+      HttpServerResponse.jsonUnsafe(
+        { code: "CAPABILITY_DISABLED", message: "This API family is not enabled in MySQL mode" },
+        { status: 503 },
+      ),
+    ),
+  ),
+)
+const activeServerRoutes = process.env.OPENCODE_DB_DIALECT === "mysql" ? mysqlDisabledApiRoute : serverRoutes
 
 // `OpenApi.fromApi` is non-trivial; defer until /doc is actually hit so
 // processes that never serve it (CLI, scripts) don't pay at module load.
@@ -233,6 +254,7 @@ const app = LayerNode.group([
   PermissionSaved.node,
   Todo.node,
   Session.node,
+  SessionAdmission.node,
   SessionProjector.node,
   SessionStatus.node,
   BackgroundJob.node,
@@ -268,8 +290,24 @@ const app = LayerNode.group([
   PtyTicket.node,
 ])
 
+const persistenceReplacements =
+  process.env.OPENCODE_DB_DIALECT === "mysql"
+    ? ([
+        [Session.node, MysqlSession.node],
+        [SessionAdmission.node, MysqlSessionAdmission.node],
+        [SessionStatus.node, MysqlSessionStatus.node],
+        [Todo.node, MysqlTodo.node],
+        [Permission.node, MysqlPermission.node],
+        [Question.node, MysqlQuestion.node],
+        [EventV2Bridge.node, MysqlEventV2Bridge.node],
+        [SessionProjector.node, Layer.empty],
+        [Database.node, Database.layerFromPath(":memory:")],
+      ] as const)
+    : []
+
 export function createRoutes(
   corsOptions?: CorsOptions,
+  runtimeConfig?: RuntimeConfig.Interface,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   const locationServiceMapV2 = buildLocationServiceMap()
 
@@ -278,7 +316,7 @@ export function createRoutes(
     eventApiRoutes,
     ptyConnectApiRoutes,
     instanceRoutes,
-    serverRoutes,
+    activeServerRoutes,
     docRoute,
     uiRoute,
   ).pipe(
@@ -303,7 +341,12 @@ export function createRoutes(
     ),
     Layer.provide(locationServiceMapV2),
 
-    Layer.provide(AppNodeBuilderV1.build(app)),
+    Layer.provide(
+      AppNodeBuilderV1.build(app, [
+        ...persistenceReplacements,
+        ...(runtimeConfig ? ([[RuntimeConfig.node, RuntimeConfig.layer(runtimeConfig)]] as const) : []),
+      ]),
+    ),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout

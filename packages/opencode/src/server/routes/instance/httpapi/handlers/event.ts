@@ -8,6 +8,7 @@ import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
+import { RequestScope } from "@opencode-ai/core/persistence/scope"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -22,7 +23,7 @@ function eventID() {
   return EventV2.ID.create()
 }
 
-function eventResponse(events: EventV2.Interface) {
+function eventResponse(events: EventV2.Interface, scope?: RequestScope.Value) {
   return Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
@@ -32,10 +33,11 @@ function eventResponse(events: EventV2.Interface) {
     const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)))
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
-      Stream.filter(
-        (event) =>
-          event.location?.directory === instance.directory &&
-          (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
+      Stream.filter((event) =>
+        process.env.OPENCODE_DB_DIALECT === "mysql"
+          ? event.metadata?.userId === scope?.userId
+          : event.location?.directory === instance.directory &&
+            (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
@@ -92,7 +94,7 @@ export const eventHandlers = HttpApiBuilder.group(EventApi, "event", (handlers) 
     return handlers.handleRaw(
       "subscribe",
       Effect.fn("EventHttpApi.subscribe")(function* () {
-        return yield* eventResponse(events)
+        return yield* eventResponse(events, yield* RequestScope.Current)
       }),
     )
   }),

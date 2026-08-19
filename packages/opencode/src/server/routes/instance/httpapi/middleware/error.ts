@@ -1,5 +1,6 @@
 import { NamedError } from "@opencode-ai/core/util/error"
 import { ConfigErrorV1 } from "@opencode-ai/core/v1/config/error"
+import { PersistenceError } from "@opencode-ai/core/persistence/error"
 import { Cause, Effect } from "effect"
 import { HttpRouter, HttpServerError, HttpServerRespondable, HttpServerResponse } from "effect/unstable/http"
 
@@ -16,6 +17,38 @@ export const errorLayer = HttpRouter.middleware<{ handles: unknown }>()((effect)
       if (!defect) return Effect.failCause(cause)
 
       const error = defect.defect
+      if (error instanceof PersistenceError.StaleOwner)
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe(
+            { code: "STALE_OWNER", message: "Owner generation is stale", current: error.current.toString() },
+            { status: 409 },
+          ),
+        )
+      if (error instanceof PersistenceError.IdempotencyConflict)
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe(
+            { code: "IDEMPOTENCY_CONFLICT", message: "Request id was reused with a different payload" },
+            { status: 409 },
+          ),
+        )
+      if (error instanceof PersistenceError.RunIdRequired)
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe(
+            { code: "RUN_ID_REQUIRED", message: "x-opencode-run-id is required" },
+            { status: 400 },
+          ),
+        )
+      if (error instanceof PersistenceError.SessionNotFound)
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe({ code: "NOT_FOUND", message: "Session not found" }, { status: 404 }),
+        )
+      if (error instanceof PersistenceError.Unavailable)
+        return Effect.succeed(
+          HttpServerResponse.jsonUnsafe(
+            { code: "PERSISTENCE_UNAVAILABLE", message: "MySQL persistence is unavailable" },
+            { status: 503 },
+          ),
+        )
       if (
         ConfigErrorV1.JsonError.isInstance(error) ||
         ConfigErrorV1.InvalidError.isInstance(error) ||

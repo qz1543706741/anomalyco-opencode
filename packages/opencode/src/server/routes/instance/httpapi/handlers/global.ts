@@ -5,13 +5,14 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import { Effect, Queue, Schema } from "effect"
+import { Effect, Option, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
+import { RequestScope } from "@opencode-ai/core/persistence/scope"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -30,7 +31,7 @@ function parseBody(body: string) {
   }
 }
 
-function eventResponse() {
+function eventResponse(scope?: RequestScope.Value) {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
     const events = Stream.callback<GlobalBusEvent>((queue) => {
@@ -47,7 +48,12 @@ function eventResponse() {
 
     return HttpServerResponse.stream(
       Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
-        Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+        Stream.concat(
+          events.pipe(
+            Stream.filter((event) => process.env.OPENCODE_DB_DIALECT !== "mysql" || event.userId === scope?.userId),
+            Stream.merge(heartbeat, { haltStrategy: "left" }),
+          ),
+        ),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
@@ -75,8 +81,14 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       return { healthy: true as const, version: InstallationVersion }
     })
 
-    const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return yield* eventResponse()
+    const event = Effect.fn("GlobalHttpApi.event")(function* (ctx: { request: HttpServerRequest.HttpServerRequest }) {
+      if (process.env.OPENCODE_DB_DIALECT !== "mysql") return yield* eventResponse()
+      const decoded = yield* Effect.try({
+        try: () => RequestScope.decode(new Headers(ctx.request.headers)),
+        catch: (cause) => cause,
+      }).pipe(Effect.option)
+      if (Option.isNone(decoded)) return HttpServerResponse.text("Invalid persistence scope", { status: 400 })
+      return yield* eventResponse(decoded.value)
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {

@@ -13,7 +13,11 @@ export const Event = SessionStatusEvent
 export interface Interface {
   readonly get: (sessionID: SessionID) => Effect.Effect<Info>
   readonly list: () => Effect.Effect<Map<SessionID, Info>>
-  readonly set: (sessionID: SessionID, status: Info) => Effect.Effect<void>
+  readonly set: (
+    sessionID: SessionID,
+    status: Info,
+    outcome?: "completed" | "failed" | "interrupted" | "aborted",
+  ) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionStatus") {}

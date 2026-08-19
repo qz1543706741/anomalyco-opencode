@@ -55,6 +55,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const flags = yield* RuntimeFlags.Service
+  const visible = () =>
+    Effect.filter(Object.entries(tools), ([id]) => registry.allowed(id), { concurrency: "unbounded" }).pipe(
+      Effect.map(Object.fromEntries),
+    )
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -385,7 +389,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  if (flags.experimentalCodeMode) return tools
+  if (flags.experimentalCodeMode) return yield* visible()
 
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
@@ -489,7 +493,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     tools[key] = item
   }
 
-  return tools
+  return yield* visible()
 })
 
 function toRecord(value: unknown) {

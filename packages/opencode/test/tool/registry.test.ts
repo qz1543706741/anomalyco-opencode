@@ -17,6 +17,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { RuntimeConfig } from "@/tool/runtime-config"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
@@ -94,12 +95,28 @@ const withEmptyCodeMode = testEffect(
   ]),
 )
 const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
+const withToolAllowlist = testEffect(
+  LayerNode.compile(root, [
+    ...replacements,
+    [RuntimeConfig.node, RuntimeConfig.layer({ toolAllowlist: new Set(["read"]) })],
+  ]),
+)
 
 afterEach(async () => {
   await disposeAllInstances()
 })
 
 describe("tool.registry", () => {
+  withToolAllowlist.instance("uses server runtime tool allowlist", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+
+      expect(yield* registry.ids()).toEqual(["read"])
+      expect(yield* registry.allowed("read")).toBe(true)
+      expect(yield* registry.allowed("write")).toBe(false)
+    }),
+  )
+
   it.instance("does not expose task_status", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

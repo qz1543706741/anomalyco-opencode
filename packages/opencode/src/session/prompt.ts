@@ -47,12 +47,11 @@ import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { SessionAdmission } from "./admission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { eq } from "drizzle-orm"
-import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
@@ -101,7 +100,9 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly admit: (input: PromptInput) => Effect.Effect<AdmittedPrompt>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly promptAdmitted: (input: AdmittedPrompt["input"]) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -139,8 +140,8 @@ const layer = Layer.effect(
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const admission = yield* SessionAdmission.Service
     const database = yield* Database.Service
-    const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -612,12 +613,7 @@ const layer = Layer.effect(
     })
 
     const currentModel = Effect.fnUntraced(function* (sessionID: SessionID) {
-      const current = yield* db
-        .select({ model: SessionTable.model })
-        .from(SessionTable)
-        .where(eq(SessionTable.id, sessionID))
-        .get()
-        .pipe(Effect.orDie)
+      const current = yield* sessions.get(sessionID).pipe(Effect.orDie)
       if (current?.model) {
         return {
           providerID: ProviderV2.ID.make(current.model.providerID),
@@ -1008,16 +1004,22 @@ const layer = Layer.effect(
         { message: info, parts: resolvedParts },
       )
 
-      const parts = yield* Effect.forEach(resolvedParts, (part) =>
-        part.type === "file" && part.mime.startsWith("image/")
-          ? image.normalize(part).pipe(
-              Effect.catchIf(
-                (error) => error instanceof Image.ResizerUnavailableError,
-                () => Effect.succeed(part),
-              ),
-            )
-          : Effect.succeed(part),
-      )
+      const parts = yield* Effect.forEach(resolvedParts, (part) => {
+        if (part.type !== "file" || !part.mime.startsWith("image/")) return Effect.succeed(part)
+        return Effect.gen(function* () {
+          const transformed = yield* plugin.trigger(
+            "experimental.chat.image.transform",
+            { model: { providerID: model.providerID, modelID: model.modelID } },
+            { part },
+          )
+          return yield* image.normalize(transformed.part).pipe(
+            Effect.catchIf(
+              (error) => error instanceof Image.ResizerUnavailableError,
+              () => Effect.succeed(transformed.part),
+            ),
+          )
+        })
+      })
 
       const parsed = decodeMessageInfo(info, { errors: "all", propertyOrder: "original" })
       if (Exit.isFailure(parsed)) {
@@ -1049,11 +1051,22 @@ const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
-      "SessionPrompt.prompt",
-    )(function* (input: PromptInput) {
+    const admit: Interface["admit"] = Effect.fn("SessionPrompt.admit")(function* (input) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
+      const prepared = { ...input, messageID: input.messageID ?? MessageID.ascending() }
+      if (input.noReply === true) return { input: prepared }
+      const result = yield* admission.admit({
+        sessionID: input.sessionID,
+        messageID: prepared.messageID,
+        prompt: prepared,
+        delivery: "steer",
+      })
+      return { input: prepared, runId: result.runId }
+    })
+
+    const promptAdmitted: Interface["promptAdmitted"] = Effect.fn("SessionPrompt.promptAdmitted")(function* (input) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
 
@@ -1068,6 +1081,11 @@ const layer = Layer.effect(
 
       if (input.noReply === true) return message
       return yield* loop({ sessionID: input.sessionID })
+    })
+
+    const prompt: Interface["prompt"] = Effect.fn("SessionPrompt.prompt")(function* (input) {
+      const admitted = yield* admit(input)
+      return yield* promptAdmitted(admitted.input)
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1089,9 +1107,14 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-            Effect.provideService(Database.Service, database),
-          )
+          let msgs =
+            process.env.OPENCODE_DB_DIALECT === "mysql"
+              ? MessageV2.filterCompacted(
+                  (yield* sessions.messages({ sessionID }).pipe(Effect.orDie)).toReversed(),
+                )
+              : yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+                  Effect.provideService(Database.Service, database),
+                )
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1482,7 +1505,9 @@ const layer = Layer.effect(
 
     return Service.of({
       cancel,
+      admit,
       prompt,
+      promptAdmitted,
       loop,
       shell,
       command,
@@ -1519,6 +1544,11 @@ export const PromptInput = Schema.Struct({
   ),
 })
 export type PromptInput = Schema.Schema.Type<typeof PromptInput>
+
+export interface AdmittedPrompt {
+  readonly input: PromptInput & { readonly messageID: MessageID }
+  readonly runId?: string
+}
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,
@@ -1624,6 +1654,7 @@ export const node = LayerNode.make({
     LLM.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
+    SessionAdmission.node,
     Database.node,
   ],
 })

@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -23,7 +23,6 @@ import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -93,7 +92,6 @@ const layer = Layer.effect(
     const status = yield* SessionStatus.Service
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
-    const database = yield* Database.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
@@ -350,9 +348,10 @@ const layer = Layer.effect(
                 : value.providerMetadata,
             }))
 
-            const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
-              Effect.provideService(Database.Service, database),
-            )
+            const message = yield* session
+              .findMessage(ctx.sessionID, (item) => item.info.id === ctx.assistantMessage.id)
+              .pipe(Effect.orDie)
+            const parts = Option.isSome(message) ? message.value.parts : []
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 
             if (
@@ -388,17 +387,23 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
-            const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
-              attachment.mime.startsWith("image/")
-                ? image.normalize(attachment).pipe(
-                    Effect.catchIf(
-                      (error) => error instanceof Image.ResizerUnavailableError,
-                      () => Effect.succeed(attachment),
-                    ),
-                    Effect.exit,
-                  )
-                : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
-            )
+            const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) => {
+              if (!attachment.mime.startsWith("image/"))
+                return Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment))
+              return Effect.gen(function* () {
+                const transformed = yield* plugin.trigger(
+                  "experimental.chat.image.transform",
+                  { model: { providerID: ctx.model.providerID, modelID: ctx.model.id } },
+                  { part: attachment },
+                )
+                return yield* image.normalize(transformed.part).pipe(
+                  Effect.catchIf(
+                    (error) => error instanceof Image.ResizerUnavailableError,
+                    () => Effect.succeed(transformed.part),
+                  ),
+                )
+              }).pipe(Effect.exit)
+            })
             const omitted = normalized.filter(Exit.isFailure).length
             const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
             const output = {
@@ -609,7 +614,7 @@ const layer = Layer.effect(
             ctx.assistantMessage.error = error
             ctx.assistantMessage.finish = "error"
             yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
-            yield* status.set(ctx.sessionID, { type: "idle" })
+            yield* status.set(ctx.sessionID, { type: "idle" }, "failed")
             return
           }
           ctx.needsCompaction = true
@@ -621,7 +626,7 @@ const layer = Layer.effect(
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
         })
-        yield* status.set(ctx.sessionID, { type: "idle" })
+        yield* status.set(ctx.sessionID, { type: "idle" }, "failed")
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
@@ -711,7 +716,6 @@ export const node = LayerNode.make({
     SessionStatus.node,
     Image.node,
     EventV2Bridge.node,
-    Database.node,
   ],
 })
 

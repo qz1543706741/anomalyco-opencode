@@ -241,11 +241,22 @@ export interface Hooks {
     },
     output: { message: UserMessage; parts: Part[] },
   ) => Promise<void>
+  "experimental.chat.image.transform"?: (
+    input: { model: { providerID: string; modelID: string } },
+    output: { part: Extract<Part, { type: "file" }> },
+  ) => Promise<void>
   /**
    * Modify parameters sent to LLM
    */
   "chat.params"?: (
-    input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
+    input: {
+      sessionID: string
+      agent: string
+      model: Model
+      provider: ProviderContext
+      message: UserMessage
+      messages?: unknown[]
+    },
     output: {
       temperature: number
       topP: number

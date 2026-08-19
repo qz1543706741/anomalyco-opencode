@@ -1,0 +1,15 @@
+{
+  "version": 4,
+  "source": "codeflicker",
+  "projectPath": "/Users/qinzhen/Desktop/github/opencode",
+  "migratedAt": "2026-07-19T07:46:46.215Z",
+  "result": {
+    "moved": true,
+    "merged": false,
+    "conflicts": 0,
+    "rulesCopied": 0,
+    "rulesSkipped": 0,
+    "commandSkillsCreated": 0,
+    "commandSkillsSkipped": 0
+  }
+}

@@ -74,6 +74,44 @@ describe("ProviderTransform.options - setCacheKey", () => {
     expect(result.promptCacheKey).toBeUndefined()
   })
 
+  test("passes final assembled messages to chat.params", async () => {
+    let hookMessages: unknown
+    await Effect.runPromise(
+      LLMRequestPrep.prepare({
+        user: {
+          id: "msg_user-test",
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: "anthropic", modelID: mockModel.id },
+        } as any,
+        sessionID,
+        model: mockModel,
+        agent: { name: "test", mode: "primary", options: {}, permission: [] } as any,
+        system: ["project system"],
+        messages: [{ role: "user", content: "Hello" }],
+        tools: {},
+        provider: { id: "anthropic", options: {} } as any,
+        auth: undefined,
+        plugin: {
+          trigger: (name: string, input: any, output: unknown) => {
+            if (name === "chat.params") hookMessages = input.messages
+            return Effect.succeed(output)
+          },
+          list: () => Effect.succeed([]),
+          init: () => Effect.void,
+        } as any,
+        flags: { outputTokenMax: 32_000, client: "test" } as any,
+        isWorkflow: false,
+      }),
+    )
+    expect(hookMessages).toEqual([
+      { role: "system", content: expect.stringContaining("project system") },
+      { role: "user", content: "Hello" },
+    ])
+  })
+
   test("should set promptCacheKey for openai provider by default", () => {
     const openaiModel = {
       ...mockModel,

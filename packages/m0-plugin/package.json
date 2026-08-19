@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@m0/opencode-plugin",
+  "version": "0.1.9",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./server": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "bun build src/server.ts --outdir dist --target bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external langfuse --external ai --external @ai-sdk/provider-utils",
+    "prepack": "bun run build",
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test --timeout 30000 --only-failures"
+  },
+  "publishConfig": {
+    "registry": "https://npm.corp.kuaishou.com/"
+  },
+  "engines": {
+    "opencode": ">=1.18.1 <2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qz1543706741/opencode.git",
+    "directory": "packages/m0-plugin"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.1 <2",
+    "@opencode-ai/sdk": ">=1.18.1 <2",
+    "ai": ">=6 <7"
+  },
+  "dependencies": {
+    "langfuse": "3.38.20"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider-utils": "catalog:",
+    "ai": "catalog:",
+    "@opencode-ai/plugin": "workspace:*",
+    "@opencode-ai/sdk": "workspace:*",
+    "@tsconfig/node22": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:"
+  }
+}

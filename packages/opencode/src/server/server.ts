@@ -12,7 +12,9 @@ import { disposeMiddleware } from "./routes/instance/httpapi/lifecycle"
 import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
 import { PublicApi } from "./routes/instance/httpapi/public"
 import type { CorsOptions } from "@opencode-ai/server/cors"
+import { bridgeClientDisconnect } from "@opencode-ai/server/client-disconnect"
 import { lazy } from "@/util/lazy"
+import { RuntimeConfig } from "@/tool/runtime-config"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -29,11 +31,12 @@ type ServerApp = {
   request(input: string | URL | Request, init?: RequestInit): Response | Promise<Response>
 }
 
-type ListenOptions = CorsOptions & {
+export type ListenOptions = CorsOptions & {
   port: number
   hostname: string
   mdns?: boolean
   mdnsDomain?: string
+  runtimeConfig?: RuntimeConfig.Interface
 }
 type ListenerState = {
   scope: Scope.Scope
@@ -98,7 +101,7 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 )
 
 function listenerLayer(opts: ListenOptions, port: number) {
-  return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
+  return HttpRouter.serve(HttpApiApp.createRoutes(opts, opts.runtimeConfig), {
     middleware: disposeMiddleware,
     disableLogger: true,
     disableListenLog: true,
@@ -197,7 +200,7 @@ function forceClose(state: ListenerState) {
 }
 
 function serverLayer(opts: { port: number; hostname: string }) {
-  const server = createServer()
+  const server = bridgeClientDisconnect(createServer())
   const serverRef = { closeStarted: false, forceStop: false }
   const close = server.close.bind(server)
   // Keep shutdown owned by NodeHttpServer, but honor listener.stop(true) by

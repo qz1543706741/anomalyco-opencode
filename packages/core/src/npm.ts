@@ -77,12 +77,12 @@ const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem
     const flock = yield* EffectFlock.Service
     const directory = (pkg: string) => path.join(global.cache, "packages", sanitize(pkg))
-    const reify = (input: { dir: string; add?: string[] }) =>
+    const reify = (input: { dir: string; add?: string[]; configDir?: string }) =>
       Effect.gen(function* () {
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
-        const npmOptions = yield* NpmConfig.load(input.dir)
+        const npmOptions = yield* NpmConfig.load(input.configDir ?? input.dir)
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,
@@ -126,11 +126,11 @@ const layer = Layer.effect(
         return resolveEntryPoint(name, path.join(dir, "node_modules", name))
       }
 
-      const tree = yield* reify({ dir, add: [pkg] })
+      const tree = yield* reify({ dir, add: [pkg], configDir: process.cwd() })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
-        if (result.entrypoint) return result
+        if (yield* afs.existsSafe(result.directory)) return result
         return yield* new InstallFailedError({ add: [pkg], dir })
       }
       return resolveEntryPoint(first.name, first.path)

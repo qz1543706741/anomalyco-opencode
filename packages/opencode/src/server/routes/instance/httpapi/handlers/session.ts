@@ -36,7 +36,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, notFound } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -120,13 +120,18 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
       }
 
-      const page = yield* SessionError.mapStorageNotFound(
-        MessageV2.page({
-          sessionID: ctx.params.sessionID,
-          limit: ctx.query.limit,
-          before: ctx.query.before,
-        }),
-      )
+      const page =
+        process.env.OPENCODE_DB_DIALECT === "mysql"
+          ? yield* SessionError.mapStorageNotFound(
+              mysqlMessagePage(session, ctx.params.sessionID, ctx.query.limit, ctx.query.before),
+            )
+          : yield* SessionError.mapStorageNotFound(
+              MessageV2.page({
+                sessionID: ctx.params.sessionID,
+                limit: ctx.query.limit,
+                before: ctx.query.before,
+              }),
+            )
       if (!page.cursor) return page.items
 
       const request = yield* HttpServerRequest.HttpServerRequest
@@ -147,6 +152,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
+      if (process.env.OPENCODE_DB_DIALECT === "mysql") {
+        const value = (yield* SessionError.mapStorageNotFound(
+          session.messages({ sessionID: ctx.params.sessionID }),
+        )).find((item) => item.info.id === ctx.params.messageID)
+        if (!value) return yield* notFound(`Message not found: ${ctx.params.messageID}`)
+        return value
+      }
       return yield* SessionError.mapStorageNotFound(
         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
       )
@@ -297,14 +309,18 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const message = yield* promptSvc
-        .prompt({
+      const admitted = yield* promptSvc
+        .admit({
           ...ctx.payload,
           sessionID: ctx.params.sessionID,
         })
         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      const message = yield* promptSvc
+        .promptAdmitted(admitted.input)
+        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
+        headers: admitted.runId ? { "x-opencode-run-id": admitted.runId } : undefined,
       })
     })
 
@@ -313,7 +329,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+      const admitted = yield* promptSvc.admit({ ...ctx.payload, sessionID: ctx.params.sessionID })
+      yield* promptSvc.promptAdmitted(admitted.input).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
             yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
@@ -325,7 +342,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ),
         Effect.forkIn(scope, { startImmediately: true }),
       )
-      return HttpApiSchema.NoContent.make()
+      if (!admitted.runId) return HttpApiSchema.NoContent.make()
+      return HttpServerResponse.empty({ status: 204, headers: { "x-opencode-run-id": admitted.runId } })
     })
 
     const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
@@ -440,3 +458,24 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("updatePart", updatePart)
   }),
 )
+
+function mysqlMessagePage(session: Session.Interface, sessionID: SessionID, limit: number, before?: string) {
+  return Effect.gen(function* () {
+    const cursor = before ? MessageV2.cursor.decode(before) : undefined
+    const values = (yield* session.messages({ sessionID })).filter((item) => {
+      if (!cursor) return true
+      const created = item.info.time.created
+      return created < cursor.time || (created === cursor.time && item.info.id < cursor.id)
+    })
+    const items = values.slice(-limit)
+    const first = items[0]
+    return {
+      items,
+      more: values.length > limit,
+      cursor:
+        values.length > limit && first
+          ? MessageV2.cursor.encode({ id: first.info.id, time: first.info.time.created })
+          : undefined,
+    }
+  })
+}

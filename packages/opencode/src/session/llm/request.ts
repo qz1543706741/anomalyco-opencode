@@ -119,6 +119,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       model: input.model,
       provider: input.provider,
       message: input.user,
+      messages,
     },
     {
       temperature: input.model.capabilities.temperature

@@ -388,6 +388,7 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 database tools
 
 Commands:
+  opencode db migrate     apply MySQL schema migrations
   opencode db [query]     open an interactive sqlite3 shell or run a query                 [default]
   opencode db path        print the database path
 

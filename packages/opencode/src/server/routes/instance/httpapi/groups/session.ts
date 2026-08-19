@@ -14,6 +14,7 @@ import { Snapshot } from "@/snapshot"
 import { Schema, Struct } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
+import { RequestScopeMiddleware } from "../middleware/request-scope"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import {
   WorkspaceRoutingMiddleware,
@@ -451,6 +452,7 @@ export const SessionApi = HttpApi.make("session")
       )
       .middleware(InstanceContextMiddleware)
       .middleware(WorkspaceRoutingMiddleware)
+      .middleware(RequestScopeMiddleware)
       .middleware(Authorization),
   )
   .annotateMerge(
